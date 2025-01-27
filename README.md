@@ -38,3 +38,6 @@ brainstorming ai:
 - can we use a general/trained LLM model or might it be better to only use quantitative terms
     - can both be used but for different scenarios; news sentiment & regular buy-sell model
 
+
+
+
