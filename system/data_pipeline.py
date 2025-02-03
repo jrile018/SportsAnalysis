@@ -1,6 +1,5 @@
 import sqlite3
 import requests
-from datetime import datetime
 import os
 from dotenv import load_dotenv
 
@@ -8,44 +7,32 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def initialize_db():
-    # Connect to SQLite database
-    conn = sqlite3.connect('mlb_data.db')
+    # This function creates the necessary tables in our tennis database.
+    conn = sqlite3.connect('tennis_data.db')
     cursor = conn.cursor()
-
-    # Create tables
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS teams (
-        team_id INTEGER PRIMARY KEY,
-        name TEXT,
-        abbreviation TEXT,
-        location TEXT
-    )
-    ''')
 
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS players (
         player_id INTEGER PRIMARY KEY,
         full_name TEXT,
-        team_id INTEGER,
-        position TEXT,
-        FOREIGN KEY (team_id) REFERENCES teams (team_id)
+        country TEXT
     )
     ''')
 
     cursor.execute('''
-    CREATE TABLE IF NOT EXISTS games (
-        game_id INTEGER PRIMARY KEY,
-        date TEXT,
-        home_team_id INTEGER,
-        away_team_id INTEGER,
-        home_score INTEGER,
-        away_score INTEGER,
-        FOREIGN KEY (home_team_id) REFERENCES teams (team_id),
-        FOREIGN KEY (away_team_id) REFERENCES teams (team_id)
+    CREATE TABLE IF NOT EXISTS matches (
+        match_id INTEGER PRIMARY KEY,
+        match_date TEXT,
+        player1_id INTEGER,
+        player2_id INTEGER,
+        score TEXT,
+        winner_id INTEGER,
+        FOREIGN KEY (player1_id) REFERENCES players (player_id),
+        FOREIGN KEY (player2_id) REFERENCES players (player_id),
+        FOREIGN KEY (winner_id) REFERENCES players (player_id)
     )
     ''')
 
-    # Create odds table
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS odds (
         odds_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,9 +41,8 @@ def initialize_db():
         event_name TEXT,
         bookmaker TEXT,
         market TEXT,
-        odds_home REAL,
-        odds_away REAL,
-        odds_draw REAL,
+        odds_player1 REAL,
+        odds_player2 REAL,
         region TEXT,
         timestamp TEXT
     )
@@ -66,23 +52,22 @@ def initialize_db():
     conn.commit()
     conn.close()
 
-# Function to fetch data from MLB API or Odds API
-def fetch_data(url):
-    response = requests.get(url)
+def fetch_data(url, params=None):
+    response = requests.get(url, params=params)
     if response.status_code == 200:
         return response.json()
     else:
         print(f"Failed to fetch data. Status code: {response.status_code}")
         return None
-    
-REGIONS = "us,uk,eu"
 
 def fetch_odds():
     API_KEY = os.getenv("ODDS_API_KEY")
     BASE_URL = "https://api.the-odds-api.com/v4/sports"
-    SPORT = "baseball_mlb_world_series_winner"
+    # For tennis, use the appropriate sport key.
+    # (Check the API docs; here we assume "tennis_atp" for ATP matches.)
+    SPORT = "tennis_atp"
     REGIONS = "us,uk,eu"
-    MARKETS = "outrights"  # Use outright market
+    MARKETS = "h2h"  # head-to-head market for match winners
     ODDS_FORMAT = "decimal"
     DATE_FORMAT = "iso"
 
@@ -95,53 +80,73 @@ def fetch_odds():
         "dateFormat": DATE_FORMAT,
     }
 
-    # Make the request
     response = requests.get(url, params=params)
     print(f"Status Code: {response.status_code}")
-    print("Response:", response.json())  # Debugging the response
+
+    try:
+        data = response.json()
+    except Exception as e:
+        print("Error parsing JSON:", e)
+        return None
+
     if response.status_code == 200:
-        return response.json()
+        return data
     else:
         print(f"Error fetching odds: {response.status_code} - {response.text}")
         return None
 
-def insert_outright_odds(odds_data):
+def insert_tennis_odds(odds_data):
     """
-    Inserts outright odds into the database, treating each outcome as an event.
+    Inserts tennis odds into the database. Assumes each event corresponds to a match with two players.
     """
-    conn = sqlite3.connect('mlb_data.db')
+    conn = sqlite3.connect('tennis_data.db')
     cursor = conn.cursor()
 
     for event in odds_data:
         sport_key = event.get("sport_key")
+        event_id = event.get("id", None)  # if provided by the API
         commence_time = event.get("commence_time")
+
+        # Construct an event name. Many tennis events list competitors in a "teams" field.
+        teams = event.get("teams", [])
+        if len(teams) == 2:
+            event_name = " vs ".join(teams)
+        else:
+            event_name = "Unknown vs Unknown"
 
         for bookmaker in event.get("bookmakers", []):
             bookmaker_name = bookmaker.get("title")
             for market in bookmaker.get("markets", []):
                 market_type = market.get("key")
-                for outcome in market.get("outcomes", []):
-                    # Use outcome name as the event name
-                    event_name = outcome.get("name")
-                    team_odds = outcome.get("price")
+                outcomes = market.get("outcomes", [])
+                odds_player1 = None
+                odds_player2 = None
+                if len(outcomes) == 2:
+                    odds_player1 = outcomes[0].get("price")
+                    odds_player2 = outcomes[1].get("price")
 
-                    # Insert odds into the database
-                    cursor.execute('''
+                # Insert the odds record into the database
+                cursor.execute('''
                     INSERT INTO odds (
-                        sport_key, event_id, event_name, bookmaker, market, odds_home, odds_away, odds_draw, region, timestamp
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        sport_key, None, event_name, bookmaker_name, market_type,
-                        team_odds, None, None, bookmaker.get("region", "unknown"), commence_time
-                    ))
+                        sport_key, event_id, event_name, bookmaker, market, odds_player1, odds_player2, region, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    sport_key, event_id, event_name, bookmaker_name, market_type,
+                    odds_player1, odds_player2, bookmaker.get("region", "unknown"), commence_time
+                ))
 
     conn.commit()
-    print("Outright odds data inserted successfully.")
+    print("Tennis odds data inserted successfully.")
     conn.close()
 
-odds_data = fetch_odds()
-if odds_data is None or len(odds_data) == 0:
-    print("No data fetched from the API. Check the API response or parameters.")
-else:
-    print("Fetched odds data:", odds_data)
-    insert_outright_odds(odds_data)
+if __name__ == "__main__":
+    # Optionally, initialize the DB (if not already done via database.py)
+    initialize_db()
+
+    odds_data = fetch_odds()
+    if odds_data is None or len(odds_data) == 0:
+        print("No data fetched from the API. Check the API response or parameters.")
+    else:
+        print("Fetched odds data:")
+        print(odds_data)
+        insert_tennis_odds(odds_data)

@@ -1,7 +1,0 @@
-sqlite3
-selenium
-pandas
-numpy
-requests
-python-dotenv
-matplotlib

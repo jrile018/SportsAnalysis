@@ -1,72 +1,116 @@
-from data_fetcher import DataFetcher
+# strategies_xgboost.py
+import numpy as np
 import pandas as pd
+from xgboost import XGBClassifier
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.metrics import accuracy_score
+from sklearn.calibration import CalibratedClassifierCV
 
-class Strategy:
-    def __init__(self, risk_target, capital, num_stocks=5):
-        self.risk_target = risk_target
-        self.capital = capital
-        self.num_stocks = num_stocks
-        self.data = None
+# --- Monkey Patch Start ---
+# Define a simple __sklearn_tags__ function that ignores any parent calls.
+def custom_sklearn_tags(estimator):
+    return {
+        'binary_only': False,
+        'multilabel': False,
+        'multioutput': False,
+        'requires_y': True,
+        'poor_score': False,
+    }
 
-    def fetch_data(self):
-        """Fetch and prepare data for the strategy."""
-        raise NotImplementedError("Each strategy must implement fetch_data().")
+# Patch the XGBClassifier class by assigning our custom function.
+XGBClassifier.__sklearn_tags__ = custom_sklearn_tags
+# --- Monkey Patch End ---
 
-    def run(self):
-        """Generate buy-sell signals."""
-        raise NotImplementedError("Each strategy must implement run().")
+class XGBoostStrategy:
+    def __init__(self, risk_target, capital):
+        self.risk_target = risk_target  # Fraction of capital to risk per trade
+        self.capital = capital          # Total available capital
+        self.model = None
+        self._prepare_model()
 
-class ExampleStrategy(Strategy):
-    def fetch_data(self):
-        """Fetch odds data for the strategy."""
-        fetcher = DataFetcher()
-        raw_data = fetcher.fetch_odds(fetch_from_api=True)
+    def _prepare_model(self):
+        # For demonstration, we create synthetic yet structured data.
+        np.random.seed(42)
+        data_size = 1000
+        
+        # Example features:
+        # - odds_diff: difference between our estimated odds and market odds.
+        # - player_form: recent performance metric.
+        # - head_to_head: historical head-to-head win rate difference.
+        df = pd.DataFrame({
+            'odds_diff': np.random.randn(data_size) * 0.5 + 0.1,
+            'player_form': np.random.randn(data_size) * 0.5,
+            'head_to_head': np.random.randn(data_size) * 0.3
+        })
+        # Define target variable: a trade is profitable if odds_diff > 0.2 and player_form > 0.
+        df['profitable'] = ((df['odds_diff'] > 0.2) & (df['player_form'] > 0)).astype(int)
 
-        # Debug: Print raw data length and sample
-        print(f"Raw data length: {len(raw_data)}")
-        print("Raw data sample:", raw_data[:2])  # Print first two events to inspect structure
+        # Split the data into training and testing sets.
+        X = df[['odds_diff', 'player_form', 'head_to_head']]
+        y = df['profitable']
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-        events = []
-        for event in raw_data:
-            sport_key = event.get("sport_key")
-            commence_time = event.get("commence_time")
-            for bookmaker in event.get("bookmakers", []):
-                bookmaker_name = bookmaker.get("title")
-                for market in bookmaker.get("markets", []):
-                    for outcome in market.get("outcomes", []):
-                        events.append({
-                            "event_name": outcome.get("name"),  # Use outcome name as event name
-                            "odds_home": outcome.get("price"),
-                            "bookmaker": bookmaker_name,
-                            "market": market.get("key"),
-                            "timestamp": commence_time,
-                        })
+        # Initialize an XGBoost classifier.
+        # (Setting use_label_encoder=False and specifying eval_metric avoids warnings.)
+        xgb_model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+        
+        # Define a parameter grid for hyperparameter tuning.
+        param_grid = {
+            'n_estimators': [50, 100],
+            'max_depth': [3, 5, 10],
+            'learning_rate': [0.01, 0.1, 0.2],
+            'subsample': [0.8, 1.0]
+        }
+        
+        # Use grid search with cross-validation to find the best model parameters.
+        grid_search = GridSearchCV(xgb_model, param_grid, cv=5, scoring='accuracy')
+        grid_search.fit(X_train, y_train)
+        best_xgb = grid_search.best_estimator_
+        
+        # Optionally, calibrate the model so the predicted probabilities are more reliable.
+        self.model = CalibratedClassifierCV(best_xgb, cv=5)
+        self.model.fit(X_train, y_train)
+        
+        # Evaluate the model on the test set.
+        preds = self.model.predict(X_test)
+        accuracy = accuracy_score(y_test, preds)
+        print(f"XGBoostStrategy model trained with XGBoost. Test Accuracy: {accuracy:.2f}")
 
-        # Debug: Check parsed events
-        print(f"Parsed events: {len(events)} rows")
-        if events:
-            print("Sample parsed event:", events[0])
+    def simulate(self):
+        # For simulation, generate synthetic data that mimics realistic match scenarios.
+        np.random.seed(101)
+        simulation_size = 50
+        sim_data = pd.DataFrame({
+            'odds_diff': np.random.randn(simulation_size) * 0.5 + 0.1,
+            'player_form': np.random.randn(simulation_size) * 0.5,
+            'head_to_head': np.random.randn(simulation_size) * 0.3
+        })
 
-        # Convert to DataFrame
-        data = pd.DataFrame(events)
-        self.data = data
-        return self.data
+        # Get predicted probabilities for the "profitable" class.
+        prob_predictions = self.model.predict_proba(sim_data)[:, 1]
+        # Define a threshold probability above which a bet is placed.
+        threshold = 0.6
+        bets = prob_predictions > threshold
 
+        profitable_trades = bets.sum()
+        unprofitable_trades = simulation_size - profitable_trades
 
-    def run(self):
-        """Generate buy-sell signals based on EV."""
-        if self.data is None or self.data.empty:
-            raise ValueError("No data available to run the strategy. Ensure fetch_data() was successful.")
+        # A simplistic profit calculation: adjust your stake size using a Kelly-like approach.
+        profit_per_trade = self.risk_target * self.capital
+        total_profit = (profitable_trades * profit_per_trade -
+                        unprofitable_trades * (profit_per_trade * 0.5))
 
-        print(f"Data before signal generation: {len(self.data)} rows")
-        print(self.data.head())  # Debug first few rows
+        result = {
+            "total_trades": simulation_size,
+            "profitable_trades": int(profitable_trades),
+            "unprofitable_trades": int(unprofitable_trades),
+            "total_profit": total_profit,
+            "average_bet_probability": float(prob_predictions.mean())
+        }
+        return result
 
-        # Calculate implied probabilities and expected value
-        self.data['implied_prob'] = 1 / self.data['odds_home']
-        self.data['expected_value'] = (self.data['implied_prob'] * self.data['odds_home']) - 1
-
-        # Generate buy-sell signals
-        self.data['signal'] = self.data['expected_value'].apply(lambda x: 'BUY' if x > 0.05 else 'HOLD')
-
-        print(f"Signals generated: {self.data['signal'].value_counts().to_dict()}")
-        return self.data[['event_name', 'odds_home', 'expected_value', 'signal']]
+# Initialize the strategy with a risk target (e.g., 5% of capital per trade) and total capital.
+strategy = XGBoostStrategy(risk_target=0.05, capital=1000)
+simulation_result = strategy.simulate()
+print("Simulation Result:")
+print(simulation_result)
